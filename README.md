@@ -1,8 +1,8 @@
-# kube-event-relay
+# kube-event-analyzer
 
 ## Purpose
 
-Relay Kubernetes events into a Kafka topic.
+Analyze Kubernetes events coming through a Kafka topic from all NAIS clusters.
 
 Having a stream of events readily available events may enable further projects such as:
 
@@ -12,8 +12,4 @@ Having a stream of events readily available events may enable further projects s
 
 ## Architecture
 
-The application streams cluster events from Kubernetes, and applies filtering as needed.
-It should be possible to get Events as Protobuf directly from K8s.
-The filtered events are sent out on a Kafka topic.
-Data rate could be as much as 10 kB/s for the prod-gcp cluster, which amounts to about 864 MB/day.
-Retention times can be set to one day to a couple of months, depending on required usage.
+The application connects to the `nav-infrastructure` Kafka cluster and streams events from there.
