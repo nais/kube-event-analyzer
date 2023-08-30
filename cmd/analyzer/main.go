@@ -87,15 +87,15 @@ func run() error {
 	}
 
 	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
-		GroupID:     "kube-event-relay-kimt",
 		Brokers:     cfg.Kafka.Brokers,
 		Topic:       cfg.Topic,
 		Partition:   0,
 		Dialer:      dialer,
-		StartOffset: kafka.LastOffset,
+		StartOffset: kafka.FirstOffset,
+		MaxBytes:    10e6,
 	})
 
-	fmt.Printf("Kafka connection is up and running.\n")
+	fmt.Printf("Kafka reader is configured.\n")
 
 	defer func() {
 		e := kafkaReader.Close()
@@ -106,49 +106,71 @@ func run() error {
 		}
 	}()
 
-	fmt.Printf("Waiting for messages...\n")
-
 	var totalCount int
 	var totalBytes int
 	var startTime = time.Now()
 
-	defer func() {
-		fmt.Printf("\n%d events (%d bytes) in %s\n", totalCount, totalBytes, time.Now().Sub(startTime))
-	}()
+	reportEvents := func() {
+		fmt.Printf("\r%d events (%d bytes) in %s", totalCount, totalBytes, time.Now().Sub(startTime))
+	}
 
 	payload := &Payload{}
 	kubeEvent := &KubeEvent{}
+	counters := make(map[string]int)
+	ticker := time.NewTicker(250 * time.Millisecond)
+
+	defer func() {
+		fmt.Println()
+		reportEvents()
+		fmt.Println()
+		fmt.Println("Event summary")
+		fmt.Println("=============")
+		for k, v := range counters {
+			fmt.Printf("%30s: %8d\n", k, v)
+		}
+	}()
+
+	fmt.Printf("Waiting for messages...\n")
 
 	for ctx.Err() == nil {
-		msg, err := kafkaReader.ReadMessage(ctx)
-		if err != nil {
-			if ctx.Err() == nil {
-				return err
-			}
+		select {
+		case <-ticker.C:
+			reportEvents()
+		case <-ctx.Done():
 			return nil
-		}
-		totalCount++
-		totalBytes += len(msg.Value)
+		default:
+			msg, err := kafkaReader.ReadMessage(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					return err
+				}
+				return nil
+			}
+			totalCount++
+			totalBytes += len(msg.Value)
 
-		err = json.Unmarshal(msg.Value, payload)
-		if err != nil {
-			fmt.Printf("offset %08d: parse message data: %s", msg.Offset, err)
-			continue
-		}
+			err = json.Unmarshal(msg.Value, payload)
+			if err != nil {
+				fmt.Printf("\noffset %08d: parse message data: %s\n", msg.Offset, err)
+				continue
+			}
 
-		err = json.Unmarshal([]byte(payload.Message), kubeEvent)
-		if err != nil {
-			fmt.Printf("offset %08d: parse Kubernetes event: %s", msg.Offset, err)
-			continue
-		}
+			err = json.Unmarshal([]byte(payload.Message), kubeEvent)
+			if err != nil {
+				fmt.Printf("\noffset %08d: parse Kubernetes event: %s\n", msg.Offset, err)
+				continue
+			}
 
-		fmt.Printf("msg %08d: %s\n", msg.Offset, kubeEvent.Event.Message)
-		//fmt.Printf("msg %08d: %d bytes\n", msg.Offset, len(msg.Value))
-		//fmt.Printf("msg %08d: %s\n", msg.Offset, string(msg.Value))
-		//err = kafkaReader.CommitMessages(ctx, msg)
-		//if err != nil {
-		//return err
-		//}
+			counters[kubeEvent.Event.Reason]++
+
+			//fmt.Printf("msg %08d: %s\n", msg.Offset, kubeEvent.Event.Message)
+			//fmt.Printf("msg %08d: %d bytes\n", msg.Offset, len(msg.Value))
+			//fmt.Printf("msg %08d: %s\n", msg.Offset, string(msg.Value))
+			//err = kafkaReader.CommitMessages(ctx, msg)
+			//if err != nil {
+			//return err
+			//}
+		}
 	}
 
 	return nil
