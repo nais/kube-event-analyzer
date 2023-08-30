@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -114,6 +115,7 @@ func run() error {
 		fmt.Printf("\r%d events (%d bytes) in %s", totalCount, totalBytes, time.Now().Sub(startTime))
 	}
 
+	var msg kafka.Message
 	payload := &Payload{}
 	kubeEvent := &KubeEvent{}
 	counters := make(map[string]int)
@@ -125,10 +127,36 @@ func run() error {
 		fmt.Println()
 		fmt.Println("Event summary")
 		fmt.Println("=============")
-		for k, v := range counters {
-			fmt.Printf("%30s: %8d\n", k, v)
+		keys := make([]string, 0, len(counters))
+		for k := range counters {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return counters[keys[i]] < counters[keys[j]]
+		})
+		for _, k := range keys {
+			fmt.Printf("%30s: %8d\n", k, counters[k])
 		}
 	}()
+
+	ingestMessage := func(msg kafka.Message) error {
+		totalCount++
+		totalBytes += len(msg.Value)
+
+		err = json.Unmarshal(msg.Value, payload)
+		if err != nil {
+			return fmt.Errorf("offset %08d: parse message data: %w", msg.Offset, err)
+		}
+
+		err = json.Unmarshal([]byte(payload.Message), kubeEvent)
+		if err != nil {
+			return fmt.Errorf("offset %08d: parse Kubernetes event: %w", msg.Offset, err)
+		}
+
+		counters[kubeEvent.Event.Reason]++
+
+		return nil
+	}
 
 	fmt.Printf("Waiting for messages...\n")
 
@@ -139,37 +167,18 @@ func run() error {
 		case <-ctx.Done():
 			return nil
 		default:
-			msg, err := kafkaReader.ReadMessage(ctx)
+			msg, err = kafkaReader.ReadMessage(ctx)
 			if err != nil {
 				if ctx.Err() == nil {
 					return err
 				}
 				return nil
 			}
-			totalCount++
-			totalBytes += len(msg.Value)
-
-			err = json.Unmarshal(msg.Value, payload)
+			err = ingestMessage(msg)
 			if err != nil {
-				fmt.Printf("\noffset %08d: parse message data: %s\n", msg.Offset, err)
-				continue
+				fmt.Println() // break up status counter
+				fmt.Println(err)
 			}
-
-			err = json.Unmarshal([]byte(payload.Message), kubeEvent)
-			if err != nil {
-				fmt.Printf("\noffset %08d: parse Kubernetes event: %s\n", msg.Offset, err)
-				continue
-			}
-
-			counters[kubeEvent.Event.Reason]++
-
-			//fmt.Printf("msg %08d: %s\n", msg.Offset, kubeEvent.Event.Message)
-			//fmt.Printf("msg %08d: %d bytes\n", msg.Offset, len(msg.Value))
-			//fmt.Printf("msg %08d: %s\n", msg.Offset, string(msg.Value))
-			//err = kafkaReader.CommitMessages(ctx, msg)
-			//if err != nil {
-			//return err
-			//}
 		}
 	}
 
