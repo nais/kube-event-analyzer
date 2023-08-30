@@ -112,7 +112,16 @@ func run() error {
 	var startTime = time.Now()
 
 	reportEvents := func() {
-		fmt.Printf("\r%d events (%d bytes) in %s", totalCount, totalBytes, time.Now().Sub(startTime))
+		totalEventsInTopic := totalCount + int(kafkaReader.Lag())
+		percentComplete := float64(totalCount) / float64(totalEventsInTopic) * 100
+		fmt.Printf(
+			"\r[%5.1f%%] %d/%d events (%.1f MB) in %s",
+			percentComplete,
+			totalCount,
+			totalEventsInTopic,
+			float64(totalBytes)/1024/1024,
+			time.Now().Sub(startTime).Truncate(time.Millisecond*100),
+		)
 	}
 
 	var msg kafka.Message
@@ -135,7 +144,7 @@ func run() error {
 			return counters[keys[i]] < counters[keys[j]]
 		})
 		for _, k := range keys {
-			fmt.Printf("%30s: %8d\n", k, counters[k])
+			fmt.Printf("%35s: %8d\n", k, counters[k])
 		}
 	}()
 
