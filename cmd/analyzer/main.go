@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"syscall"
 	"time"
@@ -32,6 +33,39 @@ type KafkaConfig struct {
 	CertificatePath string   `envconfig:"KAFKA_CERTIFICATE_PATH"`
 	PrivateKeyPath  string   `envconfig:"KAFKA_PRIVATE_KEY_PATH"`
 	Brokers         []string `envconfig:"KAFKA_BROKERS"`
+}
+
+type Filter struct {
+	Name      regexp.Regexp
+	Namespace regexp.Regexp
+}
+
+type Filters []Filter
+
+func (f Filter) Match(event KubeEvent) bool {
+	return f.Namespace.MatchString(event.Event.InvolvedObject.Namespace) && f.Name.MatchString(event.Event.InvolvedObject.Name)
+}
+
+func (filters Filters) MatchAny(event KubeEvent) bool {
+	for _, f := range filters {
+		if f.Match(event) {
+			return true
+		}
+	}
+	return false
+}
+
+func mockFilters() Filters {
+	return Filters{
+		{
+			Name:      deref(regexp.MustCompilePOSIX(`^gemini-?`)),
+			Namespace: deref(regexp.MustCompilePOSIX(`^aura$`)),
+		},
+	}
+}
+
+func deref[T any](x *T) T {
+	return *x
 }
 
 func main() {
@@ -109,14 +143,16 @@ func run() error {
 
 	var totalCount int
 	var totalBytes int
+	var acceptedCount int
 	var startTime = time.Now()
 
 	reportEvents := func() {
 		totalEventsInTopic := totalCount + int(kafkaReader.Lag())
 		percentComplete := float64(totalCount) / float64(totalEventsInTopic) * 100
 		fmt.Printf(
-			"\r[%5.1f%%] %d/%d events (%.1f MB) in %s",
+			"\r[%5.1f%%] %d/%d/%d events (%.1f MB) in %s",
 			percentComplete,
+			acceptedCount,
 			totalCount,
 			totalEventsInTopic,
 			float64(totalBytes)/1024/1024,
@@ -129,6 +165,7 @@ func run() error {
 	kubeEvent := &KubeEvent{}
 	counters := make(map[string]int)
 	ticker := time.NewTicker(250 * time.Millisecond)
+	trackedResources := make(map[InvolvedObject]History)
 
 	defer func() {
 		fmt.Println()
@@ -146,7 +183,22 @@ func run() error {
 		for _, k := range keys {
 			fmt.Printf("%35s: %8d\n", k, counters[k])
 		}
+
+		fmt.Println()
+		fmt.Println("Tracked object summary")
+		fmt.Println("======================")
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		for k, v := range trackedResources {
+			for i := range v {
+				fmt.Printf("%s %s/%s [%04d] ", k.Kind, k.Namespace, k.Name, i)
+				enc.Encode(v[i])
+			}
+		}
+
 	}()
+
+	filters := mockFilters()
 
 	ingestMessage := func(msg kafka.Message) error {
 		totalCount++
@@ -162,7 +214,27 @@ func run() error {
 			return fmt.Errorf("offset %08d: parse Kubernetes event: %w", msg.Offset, err)
 		}
 
+		if !filters.MatchAny(*kubeEvent) {
+			return nil
+		}
+		acceptedCount++
+
+		fmt.Printf(
+			"\r%s %s %s: %s -> %s\n",
+			kubeEvent.Event.LastTimestamp.Format(time.RFC3339),
+			kubeEvent.Event.InvolvedObject.Kind,
+			kubeEvent.Event.InvolvedObject.Name,
+			kubeEvent.Event.Reason,
+			kubeEvent.Event.Message,
+		)
+
 		counters[kubeEvent.Event.Reason]++
+		history, ok := trackedResources[kubeEvent.Event.InvolvedObject]
+		if !ok {
+			history = make(History, 0)
+		}
+		history = append(history, *kubeEvent)
+		trackedResources[kubeEvent.Event.InvolvedObject] = history
 
 		return nil
 	}
@@ -194,6 +266,7 @@ func run() error {
 	return nil
 }
 
+// The event log streamer uses this message format on the Kafka topic
 type Payload struct {
 	Time    string `json:"time"`
 	Message string `json:"message"` // JSON data inside a string
@@ -217,17 +290,10 @@ type KubeEvent struct {
 				Time       time.Time `json:"time"`
 			} `json:"managedFields"`
 		} `json:"metadata"`
-		InvolvedObject struct {
-			Kind            string `json:"kind"`
-			Namespace       string `json:"namespace"`
-			Name            string `json:"name"`
-			Uid             string `json:"uid"`
-			ApiVersion      string `json:"apiVersion"`
-			ResourceVersion string `json:"resourceVersion"`
-		} `json:"involvedObject"`
-		Reason  string `json:"reason"`
-		Message string `json:"message"`
-		Source  struct {
+		InvolvedObject InvolvedObject `json:"involvedObject"`
+		Reason         string         `json:"reason"`
+		Message        string         `json:"message"`
+		Source         struct {
 			Component string `json:"component"`
 			Host      string `json:"host"`
 		} `json:"source"`
@@ -239,40 +305,15 @@ type KubeEvent struct {
 		ReportingComponent string      `json:"reportingComponent"`
 		ReportingInstance  string      `json:"reportingInstance"`
 	} `json:"event"`
-	OldEvent struct {
-		Metadata struct {
-			Name              string    `json:"name"`
-			Namespace         string    `json:"namespace"`
-			Uid               string    `json:"uid"`
-			ResourceVersion   string    `json:"resourceVersion"`
-			CreationTimestamp time.Time `json:"creationTimestamp"`
-			ManagedFields     []struct {
-				Manager    string    `json:"manager"`
-				Operation  string    `json:"operation"`
-				ApiVersion string    `json:"apiVersion"`
-				Time       time.Time `json:"time"`
-			} `json:"managedFields"`
-		} `json:"metadata"`
-		InvolvedObject struct {
-			Kind            string `json:"kind"`
-			Namespace       string `json:"namespace"`
-			Name            string `json:"name"`
-			Uid             string `json:"uid"`
-			ApiVersion      string `json:"apiVersion"`
-			ResourceVersion string `json:"resourceVersion"`
-		} `json:"involvedObject"`
-		Reason  string `json:"reason"`
-		Message string `json:"message"`
-		Source  struct {
-			Component string `json:"component"`
-			Host      string `json:"host"`
-		} `json:"source"`
-		FirstTimestamp     time.Time   `json:"firstTimestamp"`
-		LastTimestamp      time.Time   `json:"lastTimestamp"`
-		Count              int         `json:"count"`
-		Type               string      `json:"type"`
-		EventTime          interface{} `json:"eventTime"`
-		ReportingComponent string      `json:"reportingComponent"`
-		ReportingInstance  string      `json:"reportingInstance"`
-	} `json:"old_event"`
 }
+
+type InvolvedObject struct {
+	Kind            string `json:"kind"`
+	Namespace       string `json:"namespace"`
+	Name            string `json:"name"`
+	Uid             string `json:"uid"`
+	ApiVersion      string `json:"apiVersion"`
+	ResourceVersion string `json:"resourceVersion"`
+}
+
+type History []KubeEvent
