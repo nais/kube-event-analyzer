@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,12 +21,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+
+	"github.com/nais/kube-event-relay/pkg/event"
+	"github.com/nais/kube-event-relay/pkg/metrics"
 )
 
 type Config struct {
-	Kafka      KafkaConfig
-	Topic      string
-	Kubeconfig string
+	Kafka          KafkaConfig
+	Topic          string
+	Kubeconfig     string
+	MetricsAddress string `envconfig:"METRICS_ADDRESS" default:"127.0.0.1:8675"`
 }
 
 type KafkaConfig struct {
@@ -42,11 +47,11 @@ type Filter struct {
 
 type Filters []Filter
 
-func (f Filter) Match(event KubeEvent) bool {
+func (f Filter) Match(event event.KubeEvent) bool {
 	return f.Namespace.MatchString(event.Event.InvolvedObject.Namespace) && f.Name.MatchString(event.Event.InvolvedObject.Name)
 }
 
-func (filters Filters) MatchAny(event KubeEvent) bool {
+func (filters Filters) MatchAny(event event.KubeEvent) bool {
 	for _, f := range filters {
 		if f.Match(event) {
 			return true
@@ -141,6 +146,19 @@ func run() error {
 		}
 	}()
 
+	go func() {
+		fmt.Printf("Starting metrics server on %s...\n", cfg.MetricsAddress)
+		metricsHandler := metrics.Handler()
+		err := http.ListenAndServe(cfg.MetricsAddress, metricsHandler)
+		// ListenAndServe always returns a non-nil error. After Shutdown or Close,
+		// the returned error is ErrServerClosed.
+		cancel()
+		if err == http.ErrServerClosed {
+			return
+		}
+		fmt.Printf("metrics handler: %s\n", err)
+	}()
+
 	var totalCount int
 	var totalBytes int
 	var acceptedCount int
@@ -161,11 +179,9 @@ func run() error {
 	}
 
 	var msg kafka.Message
-	payload := &Payload{}
-	kubeEvent := &KubeEvent{}
 	counters := make(map[string]int)
 	ticker := time.NewTicker(250 * time.Millisecond)
-	trackedResources := make(map[InvolvedObject]History)
+	trackedResources := make(map[event.InvolvedObject]History)
 
 	defer func() {
 		fmt.Println()
@@ -204,15 +220,21 @@ func run() error {
 		totalCount++
 		totalBytes += len(msg.Value)
 
+		payload := &Payload{}
 		err = json.Unmarshal(msg.Value, payload)
 		if err != nil {
 			return fmt.Errorf("offset %08d: parse message data: %w", msg.Offset, err)
 		}
 
+		kubeEvent := &event.KubeEvent{}
 		err = json.Unmarshal([]byte(payload.Message), kubeEvent)
 		if err != nil {
 			return fmt.Errorf("offset %08d: parse Kubernetes event: %w", msg.Offset, err)
 		}
+
+		metrics.ReportEvent(*kubeEvent)
+
+		return nil
 
 		if !filters.MatchAny(*kubeEvent) {
 			return nil
@@ -274,46 +296,4 @@ type Payload struct {
 	Tenant  string `json:"tenant"`
 }
 
-type KubeEvent struct {
-	Verb  string `json:"verb"`
-	Event struct {
-		Metadata struct {
-			Name              string    `json:"name"`
-			Namespace         string    `json:"namespace"`
-			Uid               string    `json:"uid"`
-			ResourceVersion   string    `json:"resourceVersion"`
-			CreationTimestamp time.Time `json:"creationTimestamp"`
-			ManagedFields     []struct {
-				Manager    string    `json:"manager"`
-				Operation  string    `json:"operation"`
-				ApiVersion string    `json:"apiVersion"`
-				Time       time.Time `json:"time"`
-			} `json:"managedFields"`
-		} `json:"metadata"`
-		InvolvedObject InvolvedObject `json:"involvedObject"`
-		Reason         string         `json:"reason"`
-		Message        string         `json:"message"`
-		Source         struct {
-			Component string `json:"component"`
-			Host      string `json:"host"`
-		} `json:"source"`
-		FirstTimestamp     time.Time   `json:"firstTimestamp"`
-		LastTimestamp      time.Time   `json:"lastTimestamp"`
-		Count              int         `json:"count"`
-		Type               string      `json:"type"`
-		EventTime          interface{} `json:"eventTime"`
-		ReportingComponent string      `json:"reportingComponent"`
-		ReportingInstance  string      `json:"reportingInstance"`
-	} `json:"event"`
-}
-
-type InvolvedObject struct {
-	Kind            string `json:"kind"`
-	Namespace       string `json:"namespace"`
-	Name            string `json:"name"`
-	Uid             string `json:"uid"`
-	ApiVersion      string `json:"apiVersion"`
-	ResourceVersion string `json:"resourceVersion"`
-}
-
-type History []KubeEvent
+type History []event.KubeEvent
