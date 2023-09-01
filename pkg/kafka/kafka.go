@@ -58,7 +58,7 @@ func NewReader(cfg ReaderOpts) (*kafka.Reader, error) {
 		Topic:       cfg.Topic,
 		Partition:   0,
 		Dialer:      dialer,
-		StartOffset: kafka.FirstOffset,
+		StartOffset: kafka.LastOffset,
 		MaxBytes:    10e6,
 	})
 

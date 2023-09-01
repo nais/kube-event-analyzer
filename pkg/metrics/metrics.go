@@ -10,21 +10,41 @@ import (
 )
 
 const (
-	LabelKind      = "kind"
-	LabelReason    = "reason"
-	LabelNamespace = "namespace"
-	LabelName      = "name"
-	LabelSeverity  = "severity"
+	LabelKind             = "kind"
+	LabelReason           = "reason"
+	LabelNamespace        = "namespace"
+	LabelSeverity         = "severity"
+	LabelProcessingStatus = "status"
 )
 
 var (
 	events = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace:   "nais",
-		Subsystem:   "",
-		Name:        "kube_events",
-		Help:        "",
-		ConstLabels: nil,
+		Namespace: "nais",
+		Subsystem: "kube_events",
+		Name:      "count",
+		Help:      "Number of Kubernetes events processed, labeled by namespace, kind, reason and severity",
 	}, []string{LabelNamespace, LabelKind, LabelReason, LabelSeverity})
+
+	kafkalag = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "nais",
+		Subsystem: "kube_events",
+		Name:      "kafka_lag",
+		Help:      "How many messages are left to process from the Kafka topic",
+	})
+
+	offset = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "nais",
+		Subsystem: "kube_events",
+		Name:      "kafka_offset",
+		Help:      "Offset of most recent message processed from Kafka topic",
+	})
+
+	processed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "nais",
+		Subsystem: "kube_events",
+		Name:      "processed",
+		Help:      "Number of processed messages, labeled by status",
+	}, []string{LabelProcessingStatus})
 )
 
 func ReportEvent(ev event.KubeEvent) {
@@ -33,7 +53,23 @@ func ReportEvent(ev event.KubeEvent) {
 		LabelSeverity:  ev.Event.Type,
 		LabelKind:      ev.Event.InvolvedObject.Kind,
 		LabelNamespace: ev.Event.InvolvedObject.Namespace,
-		//LabelName:      ev.Event.InvolvedObject.Name,
+	}).Inc()
+}
+
+func ReportKafkaOffsets(current, lag int64) {
+	offset.Set(float64(current))
+	kafkalag.Set(float64(lag))
+}
+
+func ReportProcessed(success bool) {
+	var status string
+	if success {
+		status = "ok"
+	} else {
+		status = "error"
+	}
+	processed.With(prometheus.Labels{
+		LabelProcessingStatus: status,
 	}).Inc()
 }
 
@@ -42,5 +78,10 @@ func Handler() http.Handler {
 }
 
 func init() {
-	prometheus.MustRegister(events)
+	prometheus.MustRegister(
+		events,
+		kafkalag,
+		offset,
+		processed,
+	)
 }
