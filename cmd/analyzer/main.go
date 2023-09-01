@@ -2,9 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -23,6 +20,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 
 	"github.com/nais/kube-event-relay/pkg/event"
+	kafka2 "github.com/nais/kube-event-relay/pkg/kafka"
 	"github.com/nais/kube-event-relay/pkg/metrics"
 )
 
@@ -97,43 +95,18 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
 	defer cancel()
 
-	cert, err := tls.LoadX509KeyPair(cfg.Kafka.CertificatePath, cfg.Kafka.PrivateKeyPath)
-	if err != nil {
-		return err
-	}
-
-	caCertPemFile, err := os.ReadFile(cfg.Kafka.CaPath)
-	if err != nil {
-		return err
-	}
-	caCertBlock, _ := pem.Decode(caCertPemFile)
-	if caCertBlock == nil {
-		return fmt.Errorf("unable to parse CA certificate file")
-	}
-	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
-	if err != nil {
-		return err
-	}
-	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(caCert)
-
-	dialer := &kafka.Dialer{
-		Timeout: 5 * time.Second,
-		TLS: &tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			RootCAs:            caCertPool,
-			InsecureSkipVerify: false,
-		},
-	}
-
-	kafkaReader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     cfg.Kafka.Brokers,
-		Topic:       cfg.Topic,
-		Partition:   0,
-		Dialer:      dialer,
-		StartOffset: kafka.FirstOffset,
-		MaxBytes:    10e6,
+	kafkaReader, err := kafka2.NewReader(kafka2.ReaderOpts{
+		Brokers:         cfg.Kafka.Brokers,
+		CaPath:          cfg.Kafka.CaPath,
+		CertificatePath: cfg.Kafka.CertificatePath,
+		DialTimeout:     time.Second * 5,
+		GroupID:         "",
+		PrivateKeyPath:  cfg.Kafka.PrivateKeyPath,
+		Topic:           cfg.Topic,
 	})
+	if err != nil {
+		return err
+	}
 
 	fmt.Printf("Kafka reader is configured.\n")
 
