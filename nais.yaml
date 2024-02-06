@@ -16,6 +16,8 @@ spec:
   - name: KAFKA_GROUP_ID
     value: metric-exporter-prod-gcp
   port: 8080
+  kafka:
+    pool: nav-infrastructure
   prometheus:
     enabled: true
     path: /
