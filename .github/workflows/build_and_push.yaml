@@ -36,11 +36,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
     - uses: actions/checkout@v3
-    - uses: nais/deploy/actions/deploy@v1
+    - uses: nais/deploy/actions/deploy@v2
       env:
-        DEPLOY_SERVER: deploy.nav.cloud.nais.io:443
-        APIKEY: ${{ secrets.NAIS_DEPLOY_APIKEY }}
         CLUSTER: prod-gcp
         RESOURCE: nais.yaml
         PRINT_PAYLOAD: "true"
-        VAR: image=europe-north1-docker.pkg.dev/nais-io/nais/images/kube-event-metric-exporter:${{ needs.build_push_sign.outputs.version }},namespace=aura
+        VAR: image=europe-north1-docker.pkg.dev/nais-io/nais/images/kube-event-metric-exporter:${{ needs.build_push_sign.outputs.version }},namespace=nais
