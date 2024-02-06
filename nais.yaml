@@ -11,6 +11,10 @@ spec:
   env:
   - name: "METRICS_ADDRESS"
     value: "0.0.0.0:8080"
+  - name: KAFKA_TOPIC
+    value: nais-system.kube-events
+  - name: KAFKA_GROUP_ID
+    value: metric-exporter-prod-gcp
   port: 8080
   prometheus:
     enabled: true
